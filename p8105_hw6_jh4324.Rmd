@@ -11,6 +11,7 @@ library(tidyverse)
 library(p8105.datasets)
 library(modelr)
 library(mgcv)
+library(rvest)
 
 knitr::opts_chunk$set(
 	fig.width = 6, 
@@ -108,15 +109,13 @@ models_results_df %>%
 # Problem 2
 
 ## Import the data
-```{r}
+```{r }
+
+# Check for missing data
+anyNA(read.csv("./data/birthweight.csv"))
+
 birthweight_df = 
-  read.csv("./data/birthweight.csv", na.strings=c("")) %>% 
-  mutate(
-    babysex = as.factor(babysex),
-    frace = as.factor(frace),
-    malform = as.factor(malform),
-    mrace = as.factor(mrace)
-  ) %>% 
+  read.csv("./data/birthweight.csv") %>% 
   mutate(
     babysex = case_when(
       babysex == 1 ~ "Male",
@@ -141,16 +140,18 @@ birthweight_df =
       frace == 4 ~ "Puerto Rican",
       frace == 8 ~ "Other"
     )
-  )
-  
+  ) %>% 
+  mutate(
+    babysex = as.factor(babysex),
+    frace = as.factor(frace),
+    malform = as.factor(malform),
+    mrace = as.factor(mrace)
+  ) 
 
-# Check for missing data
-  sum(is.na(birthweight_df))
-  
 ```
 
 ## Set two models 
-```{r}
+```{r }
 model1 = lm(bwt ~ blength + gaweeks, data = birthweight_df)
 broom::tidy(model1)
 
@@ -161,9 +162,9 @@ broom::tidy(model2)
 ## Propose a model
 
 * 1. Predictor Selection - We use backward to build the model
-we fit a regression using all predictors, and use AIC criterion for var selection, from which we choose the model with the smallest value.
+We fit a regression using all predictors, and use AIC criterion for var selection, from which we choose the model with the smallest value.
 
-```{r}
+```{r }
 all_fit = lm(bwt ~ babysex + bhead + blength + fincome + frace + gaweeks + malform + menarche + mheight + momage + mrace + parity + pnumlbw + pnumsga + ppbmi + ppwt + smoken + wtgain,data = birthweight_df)
 broom::tidy(all_fit) 
 
@@ -171,22 +172,25 @@ step(all_fit, direction='backward') %>% broom::tidy()
 ```
 
 * 2. Get the final model
+According to the result of first step, we can get some reasonable predictors, which can be added into the mode. Then we use these preditors to build the model.
 
-```{r}
+```{r }
 best_model = lm(bwt ~ fincome + frace + parity + mrace + babysex + mheight+ ppwt+ gaweeks + smoken + wtgain + blength + bhead, data = birthweight_df)
 broom::tidy(best_model)
 ```
 
 * 3. Make a plot of the "best" model
 
-```{r}
+```{r }
 # a plot of model residuals against fitted values
 plot = 
   birthweight_df %>% 
   modelr::add_residuals(best_model) %>% 
   modelr::add_predictions(best_model) %>% 
   ggplot(aes( x = pred, y =resid)) +
-  geom_point()
+  geom_point(alpha = 0.3)
+
+plot
 ```
 
 Everything is centered around 0, and it makes sense, and most points are scatter around roughly prediction = 3200, but there are some departure towards left in prediction and some towards up in residuals, which means that if baby birth weight tends low, the residuals will become high.
@@ -195,7 +199,7 @@ Everything is centered around 0, and it makes sense, and most points are scatter
 ## Compare these models
 
 * 1. Cross Validation
-```{r}
+```{r }
 cv_df = 
   crossv_mc(birthweight_df, 100)
 
@@ -215,7 +219,7 @@ cv_df =
 
 
 * 2. See the distribution of three models RMSE
-```{r}
+```{r }
 cv_df %>% 
   select(starts_with("rmse")) %>% 
   pivot_longer(
@@ -239,7 +243,7 @@ From the plot, we can see that among three models, the model I made has the lowe
 # Problem 3
 
 Import the data
-```{r}
+```{r }
 weather_df = 
   rnoaa::meteo_pull_monitors(
     c("USW00094728"),
@@ -256,4 +260,117 @@ weather_df =
 
 
 
+## Analysis the samples
+
+* 1. Build the function to get a sample
+```{r }
+# build the function to get a sample from dataset
+boot_sample = function(df){
+  sample_frac(df, replace = TRUE)
+}
+```
+
+
+* 2. Build 5000 samples
+```{r }
+# get 5000 samples
+set.seed(1)
+boot_straps = 
+  data_frame(
+    strap_number = 1:5000,
+    strap_sample = rerun(5000, boot_sample(weather_df))
+    )
+```
+
+
+* 3. Explore the distribution and 95% CI
+```{r }
+# analyze the samples 
+bootstrap_results = 
+  boot_straps %>% 
+  mutate(
+    models = map(.x = strap_sample, ~ lm(tmax ~ tmin, data =.x)),
+    results1 = map(models, broom::glance),
+    results2 = map(models, broom::tidy)
+  ) %>% 
+  select(-strap_sample, - models)
+```
+
+
+
+```{r }
+# distribution of estimated r squared
+
+bootstrap_results %>% 
+  select(strap_number,results1) %>% 
+  unnest() %>% 
+  select(strap_number, r.squared) %>% 
+  ggplot(aes(x = r.squared)) +
+  geom_density() +
+  labs(
+    x = "R squared",
+    y = "Density",
+    title = "Distribution of R squared"
+  )
+```
+From the density plot, we can see that the most frequent value of R squared is roughly 0.913. And the distribution is a little bit right skew. But in general, it's symmetric and might follow normal distribution
+
+```{r }
+# 95% CI of R squared
+
+bootstrap_results %>% 
+  select(strap_number,results1) %>% 
+  unnest() %>% 
+  select(strap_number, r.squared) %>% 
+  summarize(
+    upper = quantile(r.squared, 0.025),
+    lower = quantile(r.squared, 0.975)
+) %>% 
+  knitr::kable()
+```
+
+
+```{r include=FALSE}
+# Distribution of log(beta0*beta1)
+bootstrap_results %>% 
+  select(strap_number,results2) %>% 
+  unnest() %>% 
+  select(term, estimate) %>% 
+  pivot_wider(
+    term:estimate,
+    names_from = term, 
+    values_from = estimate
+    ) %>% 
+  unnest() %>% 
+  rename(intercept = "(Intercept)" ) %>% 
+  mutate(
+    log = log(intercept*tmin)
+  ) %>% 
+  ggplot(aes(x = log)) +
+  geom_density()
+```
+From this plot, we can see that the distribution is symmetric and it's centered around 2.015. 
+
+```{r include=FALSE}
+# 95% CI of log(beta0*beta1)
+bootstrap_results %>% 
+  select(strap_number,results2) %>% 
+  unnest() %>% 
+  select(term, estimate) %>% 
+  pivot_wider(
+    term:estimate,
+    names_from = term, 
+    values_from = estimate
+    ) %>% 
+  unnest() %>% 
+  rename(intercept = "(Intercept)" ) %>% 
+  mutate(
+    log = log(intercept*tmin)
+  ) %>% 
+  summarize(
+    lower = quantile(log, 0.025),
+    upper = quantile(log, 0.975)
+  ) %>% 
+  knitr::kable()
+```
 
