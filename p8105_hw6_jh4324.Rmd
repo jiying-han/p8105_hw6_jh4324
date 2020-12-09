@@ -9,7 +9,8 @@ knitr::opts_chunk$set(echo = TRUE)
 
 library(tidyverse)
 library(p8105.datasets)
-
+library(modelr)
+library(mgcv)
 
 knitr::opts_chunk$set(
 	fig.width = 6, 
@@ -23,23 +24,221 @@ options(
 )
 scale_colour_discrete = scale_colour_viridis_d
 scale_fill_discrete = scale_fill_viridis_d
+
 ```
 
 This is my solution of homework 6
 
 # Problem 1
+
+Import and clean the data
 ```{r}
 homicide_df = 
-  read.csv("./data/homicide-data.csv")
+  read.csv("./data/homicide-data.csv", na =c("","NA","Unknown")) %>%
+  mutate(
+    city_state = str_c(city, state, sep = ", "),
+    victim_age = as.numeric(victim_age),
+    resolution = case_when(
+      disposition == "Closed without arrest" ~ 0,
+      disposition == "Open/No arrest"        ~ 0,
+      disposition == "Closed by arrest"      ~ 1)
+  ) %>% 
+  filter(
+    victim_race %in% c("White","Black"),
+    city_state != "Tulsa, AL") %>% 
+  select(city_state, resolution, victim_age, victim_race, victim_sex)
+
 ```
+
+
+Start with one city
+```{r}
+baltimore_df = 
+  homicide_df %>% 
+  filter(city_state == "Baltimore, MD")
+
+glm(resolution ~ victim_age + victim_race + victim_sex, data = baltimore_df, family = binomial()) %>% 
+  broom::tidy() %>% 
+  mutate(
+    OR = exp(estimate),
+    CI_lower = exp(estimate - 1.96 * std.error),
+    CI_upper = exp(estimate + 1.96 * std.error)
+  ) %>% 
+  select(term, OR, starts_with("CI")) %>% 
+  knitr::kable(digit = 3)
+```
+
+
+Try this across cities
+
+```{r}
+models_results_df = 
+  homicide_df %>% 
+  nest(data = -city_state) %>% 
+  mutate(
+    models = map(.x = data, ~glm(resolution ~ victim_age + victim_race + victim_sex, data = .x, family = binomial())),
+    results = map(models, broom::tidy)
+  ) %>% 
+  select(city_state, results) %>% 
+  unnest(results) %>% 
+  mutate(
+    OR = exp(estimate),
+    CI_lower = exp(estimate - 1.96 * std.error),
+    CI_upper = exp(estimate + 1.96 * std.error)
+  ) %>% 
+  select(city_state,term, OR, starts_with("CI")) 
+```
+
+
+Make the plot
+```{r}
+models_results_df %>% 
+  filter(term == "victim_sexMale") %>% 
+  mutate(
+    city_state = fct_reorder(city_state, OR)
+  ) %>% 
+  ggplot(aes(x = city_state, y = OR)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+  
+```
+
 
 # Problem 2
+
+## Import the data
 ```{r}
 birthweight_df = 
-  read.csv("./data/birthweight.csv")
+  read.csv("./data/birthweight.csv", na.strings=c("")) %>% 
+  mutate(
+    babysex = as.factor(babysex),
+    frace = as.factor(frace),
+    malform = as.factor(malform),
+    mrace = as.factor(mrace)
+  ) %>% 
+  mutate(
+    babysex = case_when(
+      babysex == 1 ~ "Male",
+      babysex == 2 ~ "Female"
+    ),
+    frace = case_when(
+      frace == 1 ~ "White", 
+      frace == 2 ~ "Black", 
+      frace == 3 ~ "Asian", 
+      frace == 4 ~ "Puerto Rican",
+      frace == 8 ~ "Other", 
+      frace == 9 ~ "Unknown"
+    ),
+    malform = case_when(
+      malform == 0 ~ "absent", 
+      malform == 1 ~ "present"
+    ),
+    mrace = case_when(
+      mrace == 1 ~ "White", 
+      mrace == 2 ~ "Black", 
+      mrace == 3 ~ "Asian", 
+      frace == 4 ~ "Puerto Rican",
+      frace == 8 ~ "Other"
+    )
+  )
+  
+
+# Check for missing data
+  sum(is.na(birthweight_df))
+  
 ```
 
+## Set two models 
+```{r}
+model1 = lm(bwt ~ blength + gaweeks, data = birthweight_df)
+broom::tidy(model1)
+
+model2 = lm(bwt ~ bhead + blength + babysex + bhead*blength + blength*babysex + bhead*babysex + bhead*blength*babysex, data = birthweight_df)
+broom::tidy(model2)
+```
+
+## Propose a model
+
+* 1. Predictor Selection - We use backward to build the model
+we fit a regression using all predictors, and use AIC criterion for var selection, from which we choose the model with the smallest value.
+
+```{r}
+all_fit = lm(bwt ~ babysex + bhead + blength + fincome + frace + gaweeks + malform + menarche + mheight + momage + mrace + parity + pnumlbw + pnumsga + ppbmi + ppwt + smoken + wtgain,data = birthweight_df)
+broom::tidy(all_fit) 
+
+step(all_fit, direction='backward') %>% broom::tidy()
+```
+
+* 2. Get the final model
+
+```{r}
+best_model = lm(bwt ~ fincome + frace + parity + mrace + babysex + mheight+ ppwt+ gaweeks + smoken + wtgain + blength + bhead, data = birthweight_df)
+broom::tidy(best_model)
+```
+
+* 3. Make a plot of the "best" model
+
+```{r}
+# a plot of model residuals against fitted values
+plot = 
+  birthweight_df %>% 
+  modelr::add_residuals(best_model) %>% 
+  modelr::add_predictions(best_model) %>% 
+  ggplot(aes( x = pred, y =resid)) +
+  geom_point()
+```
+
+Everything is centered around 0, and it makes sense, and most points are scatter around roughly prediction = 3200, but there are some departure towards left in prediction and some towards up in residuals, which means that if baby birth weight tends low, the residuals will become high.
+
+
+## Compare these models
+
+* 1. Cross Validation
+```{r}
+cv_df = 
+  crossv_mc(birthweight_df, 100)
+
+cv_df = 
+  cv_df %>% 
+  mutate(
+    firmod = map(.x = train, ~lm(bwt ~ blength + gaweeks, data = birthweight_df)),
+    secmod = map(.x = train, ~lm(bwt ~ bhead + blength + babysex + bhead*blength + blength*babysex + bhead*babysex + bhead*blength*babysex, data = birthweight_df)),
+    bestmod = map(.x = train, ~lm(bwt ~ fincome + frace + parity + mrace + babysex + mheight+ ppwt+ gaweeks + smoken + wtgain + blength + bhead, data = birthweight_df))
+  ) %>% 
+  mutate(
+    rmse_model1 = map2_dbl(.x = firmod, .y = test, ~rmse(model = .x, data =.y)),
+    rmse_model2 = map2_dbl(.x = secmod, .y = test, ~rmse(model = .x, data =.y)),
+    rmse_bestmodel = map2_dbl(.x = bestmod, .y = test, ~rmse(model = .x, data =.y))
+  )
+```
+
+
+* 2. See the distribution of three models RMSE
+```{r}
+cv_df %>% 
+  select(starts_with("rmse")) %>% 
+  pivot_longer(
+    everything(),
+    names_to = "model",
+    values_to = "rmse",
+    names_prefix = "rmse_"
+  ) %>% 
+  ggplot(aes(x = model, y = rmse, color = model, fill = model)) +
+  geom_violin() +
+  stat_summary(fun = "median", color = "blue") +
+  labs(
+    x = "Model",
+    y = "RMSE",
+    title = "Distribution of three models' RMSE"
+  )
+```
+
+From the plot, we can see that among three models, the model I made has the lowest RMSE, which means that this is a better model than other two models.
+
 # Problem 3
+
+Import the data
 ```{r}
 weather_df = 
   rnoaa::meteo_pull_monitors(
@@ -51,6 +250,10 @@ weather_df =
     name = recode(id, USW00094728 = "CentralPark_NY"),
     tmin = tmin / 10,
     tmax = tmax / 10) %>%
-  select(name, id, everything())
+  select(name, id, everything()) 
+ 
 ```
+
+
+
 
